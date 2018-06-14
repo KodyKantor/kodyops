@@ -10,28 +10,30 @@
  * In another window you'd run the 'dd' program. When 'dd' finishes you'd come
  * back to this window and Ctrl+c to stop the trace.
  */
-
 #pragma D option quiet
 
 BEGIN
 {
-	sep = 0;
+	pattern = "|--";
+	sep = "";
+
+	printf("waiting for command\n");
 }
 
 fbt:$1::entry
 /execname == $2/
 {
-	sep += 2;
+	sep = strjoin(sep, pattern);
 }
 
 fbt:$1::*
 /execname == $2/
 {
-	printf("%*s%s -> %s\n", sep, "", probefunc, probename);
+	printf("%s %s -> %s\n", sep, probefunc, probename);
 }
 
 fbt:$1::return
 /execname == $2/
 {
-	sep -= 2;
+	sep = substr(sep, 0, strlen(sep) - strlen(pattern));
 }

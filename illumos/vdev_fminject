@@ -1,0 +1,86 @@
+/* 'detector' */
+fmridef zfs_detector_t {
+	uint8_t version;
+	string scheme;
+	uint64_t pool;
+	uint64_t vdev;
+};
+
+/* this should match a typical ZFS EIO ereport */
+evdef ereport.fs.zfs.io {
+	fmri zfs_detector_t detector;
+	string pool;
+	uint64_t pool_guid;
+	uint32_t pool_context;
+	string pool_failmode;
+	uint64_t vdev_guid;
+	string vdev_type;
+	string vdev_path;
+	string vdev_devid;
+	uint64_t parent_guid;
+	string parent_type;
+	uint32_t zio_err;
+	uint64_t zio_offset;
+	uint64_t zio_size;
+	uint64_t zio_objset;
+	uint64_t zio_object;
+	uint64_t zio_level;
+	uint64_t zio_blkid;
+};
+
+/*
+ * Create an 'event' that uses the above evdef.
+ *
+ * Two examples are below. The first is for a spare vdev, and the second
+ * is for one side of a mirror vdev.
+ */
+
+/* spare vdev */
+event ereport.fs.zfs.io spare = {
+	{ 0x0, "zfs", 0x346335363ff76e3b, 0x947096ac0dd54ffc},
+	"test",
+	0x346335363ff76e3b,
+	0,						/* pool ctx */
+	"wait",						/* failmode */
+	0x947096ac0dd54ffc,				/* guid */
+	"disk",						/* type */
+	"/dev/dsk/c2t3d0s0",				/* path */
+	"id1,sd@n6000c29a3f6ee4f9d5341183a02c544a/a",	/* devid */
+	0,
+	"spare",
+	5,
+	0x12130d400,
+	0x200,
+	0x0,
+	0x2d,
+	1,
+	0x0
+};
+
+/* one side of a mirror vdev */
+event ereport.fs.zfs.io mirror = {
+	{ 0x0, "zfs", 0x346335363ff76e3b, 0x9e81f1acbd6e7806},
+	"test",
+	0x346335363ff76e3b,
+	0,
+	"wait",
+	0x9e81f1acbd6e7806,
+	"disk",
+	"/dev/dsk/c2t2d0s0",
+	"id1,sd@n6000c29927915d2842958f945a07285a/a",
+	0x47b362117861cd95,
+	"mirror",
+	5,
+	0x12130d400,
+	0x200,
+	0x0,
+	0x2d,
+	1,
+	0x0
+};
+
+/*
+ * Specify how you want the injection to work. There are multiple options for
+ * this that are more interesting than 'repeat.'
+ */
+repeat 1000 spare;

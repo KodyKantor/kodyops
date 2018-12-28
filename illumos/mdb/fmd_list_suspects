@@ -1,0 +1,22 @@
+# list cases, fine one that you're interested in (maybe in 'SOLVE" state)
+::fmd_case
+
+# print suspect nvlist.
+# note that the fmd_case_impl_t type isn't easily found in cscope.
+<case_addr>::print fmd_case_impl_t ci_suspects->cis_nvl | ::nvlist
+
+e.g., a yet-to-be-faulted spare:
+> 938eb80::print fmd_case_impl_t ci_suspects->cis_nvl | ::nvlist
+version=00
+class='fault.fs.zfs.vdev.io'
+certainty=64
+asru
+    version=00
+    scheme='zfs'
+    pool=346335363ff76e3b
+    vdev=a6ee408040906fce
+resource
+    version=00
+    scheme='zfs'
+    pool=346335363ff76e3b
+    vdev=a6ee408040906fce

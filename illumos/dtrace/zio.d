@@ -1,114 +1,130 @@
 #!/usr/sbin/dtrace -Cs
 
-#
-# Print zio pipelines and the time they spend in each step. Currently this is
-# hard-coded to work with zil_commit (zil_lwb_write_issue) IOs.
-#
-# You can run it like this:
-#   ./zio.d 200 '"ns"' | sort -n | awk '{$1=""; print $0}'
-#
-# Which will print the first ZIO pipeline that has a total duration of 200ns.
-# The output looks like this:
-# 
-#    [31258ns] zil_lwb_write_issue
-#    [21950ns] zio_write_bp_init
-#    [19065ns] wait
-#    [23748ns] zio_issue_async
-#    [7885ns] wait
-#    [76183ns] zio_write_compress
-#    [24082ns] wait
-#    [112295ns] zio_checksum_generate
-#    [67010ns] wait
-#    [21968ns] zio_ready
-#    [83548ns] wait
-#    [94428ns] zio_vdev_io_start
-#    [22395ns] wait
-#    [16261ns] zio_vdev_io_done
-#    [157279ns] wait
-#    [21977ns] zio_vdev_io_done
-#    [75554ns] wait
-#    [19515ns] zio_vdev_io_assess
-#    [17843ns] wait
-#    [87418ns] zio_done
-#    [1001662ns] calculated_total
-#    [982835ns] lwb_total
-#
-
+/*
+ * Print zio pipelines and the time they spend in each step of the pipeline.
+ *
+ * You can run it like this:
+ *   ./zio.d zil_lwb_write_issue 200 '"ns"' | sort -n | awk '{$1=""; print $0}'
+ *
+ * Which will print the first ZIO pipeline that has a total duration of 200ns.
+ * The output looks like this:
+ *
+ *   [65532ns] zil_lwb_write_issue
+ *   [20317ns] zio_write_bp_init
+ *   [27606ns] wait
+ *   [15031ns] zio_issue_async
+ *   [16879ns] wait
+ *   [11901ns] zio_write_compress
+ *   [11568ns] wait
+ *   [13422ns] zio_checksum_generate
+ *   [12041ns] wait
+ *   [10437ns] zio_ready
+ *   [11355ns] wait
+ *   [27992ns] zio_vdev_io_start
+ *   [25709ns] wait
+ *   [9557ns] zio_vdev_io_done
+ *   [314426ns] wait
+ *   [13820ns] zio_vdev_io_done
+ *   [8677ns] wait
+ *   [18070ns] zio_vdev_io_assess
+ *   [17351ns] wait
+ *   [81714ns] zio_done
+ *   [10576ns] wait
+ *   [743981ns] DTrace calculated duration
+ *   [664521ns] ZIO reported duration
+ */
 
 #pragma D option quiet
-#pragma D option temporal
 
 #define CALC_AND_PRINT() \
 	this->duration = (timestamp - timer) / SCALE; \
-	TOTAL = TOTAL + this->duration; \
+	total = total + this->duration; \
 	printf("%d [%d%s] %s\n", timestamp, this->duration, SCALE_UNIT, \
-	    last_func); \
+	    last_func);
 	
 
 BEGIN
 {
-	THRESHOLD = $1;
-	
-	if ($2 == "ms") {
-		SCALE = 1000000;
-	} else if ($2 == "ns") {
-		SCALE = 1;
-	} else if ($2 == "us") {
-		SCALE = 1000;
-	}
-	SCALE_UNIT = $2;
+	THRESHOLD = $2;
+	SCALE_UNIT = $3;
 
-	TOTAL = 0;
+	if (SCALE_UNIT == "ns") {
+		SCALE = 1;
+	} else if (SCALE_UNIT == "us") {
+		SCALE = 1000;
+	} else if (SCALE_UNIT == "ms") {
+		SCALE = 1000000;
+	}
+
+	total = 0;
+	in_progress = 0;
 }
 
-zil_lwb_write_issue:entry
-/m_zio == NULL/
+$1:entry
+/!in_progress/
 {
-	m_zio = args[1]->lwb_write_zio;
 	spec = speculation();
 	timer = timestamp;
 	last_func = probefunc;
+	in_progress = 1; /* lock out other operations */
 	self->trace = 1;
 }
 
-zil_lwb_write_done:entry
-/args[0] == m_zio/
+/* We're not really interested in parent pipelines right now */
+zio_wait:entry,
+zio_nowait:entry
+/self->trace && args[0]->io_type != ZIO_TYPE_NULL && zio == NULL/
+{
+	zio = args[0];
+}
+
+/* Do one last speculation to print the total time in the pipeline */
+zio_destroy:entry
+/args[0] == zio/
 {
 	speculate(spec);
 	CALC_AND_PRINT();
 
-	this->lwb = (lwb_t *)args[0]->io_private;
-	this->d = (timestamp - this->lwb->lwb_issued_timestamp) / SCALE;
+	this->d = (timestamp - zio->io_queued_timestamp) / SCALE;
 
 	/*
-	 * Add one to timestamp so this is printed last when sorted by 'sort -n'.
-	 * This means these are off by a few ns, but who's counting?
+	 * Add one to timestamp so these are printed in order when sorted by
+	 * 'sort -n'.
 	 */
-	printf("%d [%d%s] %s\n", timestamp + 1, TOTAL, SCALE_UNIT, "calculated_total");
-	printf("%d [%d%s] %s\n", timestamp + 2, this->d, SCALE_UNIT, "lwb_total");
+	printf("%d [%d%s] %s\n", timestamp + 1, total, SCALE_UNIT,
+	    "DTrace calculated duration");
+	printf("%d [%d%s] %s\n", timestamp + 2, this->d, SCALE_UNIT,
+	    "ZIO reported duration");
 }
 
-zil_lwb_write_done:entry
-/args[0] == m_zio/
+/*
+ * If the pipeline took longer than our threshold, commit the speculation.
+ *
+ * Note that we use three zio_destroy:entry probes because DTrace has rules
+ * about what can and can't be done in the same probe invocation as
+ * the commit/discard operation.
+ */
+zio_destroy:entry
+/args[0] == zio/
 {
-	this->lwb = (lwb_t *)args[0]->io_private;
-	this->d = (timestamp - this->lwb->lwb_issued_timestamp) / SCALE;
+	this->d = (timestamp - zio->io_queued_timestamp) / SCALE;
 	if (this->d > THRESHOLD) {
-		self->comm = 1;
+		self->commit = 1;
 		commit(spec);
 	} else {
 		discard(spec);
 	}
 }
 
-zil_lwb_write_done:entry
-/args[0] == m_zio/
+zio_destroy:entry
+/args[0] == zio/
 {
-	if (self->comm) {
+	if (self->commit) {
 		exit(0);
 	} else {
-		TOTAL = 0;
-		m_zio = NULL;
+		/* This ZIO was beneath our threshold. Try again. */
+		total = 0;
+		zio = NULL;
 		spec = 0;
 		timer = 0;
 		last_func = 0;
@@ -139,7 +155,7 @@ zio_vdev_io_done:entry,
 zio_vdev_io_assess:entry,
 zio_checksum_verify:entry,
 zio_done:entry
-/args[0] == m_zio/
+/args[0] == zio/
 {
 	speculate(spec);
 
@@ -152,8 +168,8 @@ zio_done:entry
 
 
 /*
- * The ZIO pipeline states that it never burns a thread.
- * The zio pipeline steps either complete normally, or return
+ * The ZIO pipeline should never burn a thread.
+ * The ZIO pipeline steps either complete normally, or return
  * to be resumed later.
  */
 zio_read_bp_init:return,
@@ -178,8 +194,7 @@ zio_vdev_io_start:return,
 zio_vdev_io_done:return,
 zio_vdev_io_assess:return,
 zio_checksum_verify:return,
-zio_done:return,
-zil_lwb_write_issue:return
+zio_done:return
 /self->trace && last_func == probefunc/
 {
 	speculate(spec);

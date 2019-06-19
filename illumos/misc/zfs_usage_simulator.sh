@@ -21,30 +21,27 @@
 #
 #
 # I run this program using a command like this:
-# ./zfs_usage_simulator.sh -v recordsize_kb=128 ./datafiles/trunc.1.stor.my-region
+# ./zfs_usage_simulator.sh -v recordsize_kb=128 -v raidz_stripe_width=16 -v parity_level=3 ./datafiles/trunc.1.stor.my-region
 
 BEGIN {
 	# Tunables
-	#recordsize_kb = 512 # ZFS recordsize for the simulation.
 	target_account = "*" # Account UUID to use, or * for all accounts.
-	parity_level = 2 # RAIDZ parity level (0 thru 3).
 	verbose = 0 # Used for debugging.
+
+	#recordsize_kb = 512 # ZFS recordsize for the simulation.
+	#raidz_stripe_width = 11 # disks per RAIDZ stripe.
+	#parity_level = 2 # RAIDZ parity level (0 thru 3).
 
 	# Tunables you probably don't need to tune.
 	minimum_recordsize = 512 # smallest possible ZFS record.
 	sector_size = 4096 # 4k disks are most common nowadays.
-	recordsize_bytes = recordsize_kb * 1024
 
-	# We still have a lot of unaccounted for capacity usage. This is here
-	# until we can track that down. It's possible that to get closer to the
-	# exact usage number we'd have to make the user pass in their zpool
-	# layout information. Some things depend on the number (and size?) of
-	# vdevs (both top-level and concrete?).
-	misc_zfs_overhead_ratio = 1.15
+	compression_ratio = 1.04
 
 	# Need to know sectors per record so we can calculate any padding
 	# necessary. Padding sectors are added until the data sectors + RAIDZ
 	# sectors + padding sectors add up to a multiple of the parity level.
+	recordsize_bytes = recordsize_kb * 1024
 	sectors_per_record = recordsize_bytes / sector_size
 
 	# indirect blocks:
@@ -56,6 +53,8 @@ BEGIN {
 	avg_ind_bytes_per_rec = 45
 	blkptr_overhead = 256 # blkptr is 128 bytes, store two of 'em
 
+	max_data_sectors_per_stripe = raidz_stripe_width - parity_level
+
 	# Global counters.
 	total_usage_bytes = 0
 	total_records = 0
@@ -63,8 +62,12 @@ BEGIN {
 	total_raidz_sectors = 0
 	total_padding_sectors = 0
 
-	printf "Simulating using account %s, parity %d, and recordsize %d\n",
+	printf "Simulating... variables:\n"
+	printf "account %s, parity %d, recordsize %d, ",
 	    target_account, parity_level, recordsize_bytes
+	printf "raidz width %d, sector size %d\n",
+	    raidz_stripe_width, sector_size
+
 }
 
 function zero_variables() {
@@ -79,6 +82,7 @@ function zero_variables() {
 	ind_block_usage_bytes = 0
 
 	data_sectors = 0
+	data_stripes = 0
 	parity_sectors = 0
 	padding_sectors = 0
 }
@@ -144,8 +148,16 @@ function zero_variables() {
 
 	# Do the usage calculations.
 	data_sectors = num_whole_records * sectors_per_record
-	parity_sectors = num_whole_records * parity_level
-	padding_sectors = (data_sectors + parity_sectors) % parity_level
+	data_stripes = data_sectors / max_data_sectors_per_stripe
+	if (data_stripes % 1 > 0) {
+		parity_sectors = (int(data_stripes) + 1) * parity_level
+	} else {
+		parity_sectors = data_stripes * parity_level
+	}
+
+	# Data + parity sectors must be a multiple of parity_level+1. If not,
+	# add padding until it is.
+	padding_sectors = (parity_sectors + data_sectors) % (parity_level + 1)
 
 	obj_size_bytes = num_whole_records * recordsize_bytes
 	parity_bytes = parity_sectors * sector_size
@@ -181,7 +193,7 @@ function btotib(bytes) {
 }
 
 END {
-	total_usage_bytes *= misc_zfs_overhead_ratio
+	total_usage_bytes /= compression_ratio
 	
 	printf "=== REPORT ===\n"
 	printf "%d\t\tBytes Used\n%d\t\tWasted Bytes\n", total_usage_bytes,

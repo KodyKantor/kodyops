@@ -33,7 +33,6 @@ BEGIN {
 	#parity_level = 2 # RAIDZ parity level (0 thru 3).
 
 	# Tunables you probably don't need to tune.
-	minimum_recordsize = 512 # smallest possible ZFS record.
 	sector_size = 4096 # 4k disks are most common nowadays.
 
 	compression = 1
@@ -104,37 +103,23 @@ function zero_variables() {
 		next
 	}
 
-	# I'm not sure if this case is possible from the mako manifests,
-	# but we should account for it. If a file is 512 bytes or less
-	# the recordsize will be 512 bytes.
-	if (obj_size_bytes < recordsize_bytes) {
-		if (obj_size_bytes <= minimum_recordsize) {
-			obj_size_bytes = minimum_recordsize
-		}
-
-		parity_bytes = sector_size * parity_level
-
-		data_sectors = obj_size_bytes / sectors_per_record
-		if (data_sectors == 0) {
-			# objects less than one sector in size
-			data_sectors = 1
-		}
+	if (obj_size_bytes <= sector_size) {
+		obj_size_bytes = sector_size
 		parity_sectors = parity_level
-		padding_sectors = (data_sectors + parity_sectors) % parity_level
-		padding_bytes = padding_sectors * sector_size
 
-		total_usage_bytes += obj_size_bytes
-		total_usage_bytes += parity_bytes
-		total_records += 1
-		total_raidz_sectors += parity_level
-		total_padding_sectors += padding_sectors
-		total_usage_bytes += padding_bytes
+		# num_whole_records affects the total reported capacity for
+		# the total record and blkptr overhead calculations.
+		#
+		# The actual size of the record isn't used in the accounting
+		# routine though, so this is fine.
+		num_whole_records = 1
 
-		if (verbose) {
-			printf "%d byte obj: 1 record, %d disk bytes, ",
-				obj_size_bytes, obj_size_bytes
-			printf "%d parity bytes\n", parity_bytes
-		}
+		parity_bytes = parity_sectors * sector_size
+		padding_bytes = 0
+		ind_block_usage_bytes = 0
+		wasted_bytes = 0
+		padding_sectors = 0
+		calculate_totals()
 		next
 	}
 
@@ -142,13 +127,14 @@ function zero_variables() {
 	num_records = obj_size_bytes / recordsize_bytes
 	num_whole_records = int(obj_size_bytes / recordsize_bytes)
 	unused_record_portion = num_records - num_whole_records
-	if (unused_record_portion > 0) {
+	if (unused_record_portion > 0 && num_whole_records > 0) {
 		# ZFS uses a full record to write this 'partial' record.
+		# This doesn't take into account embedded blockpointers.
 		num_whole_records++
 
-		# ZFS wastes one extra sector worth of space when compression
-		# is enabled. I verified this using one system with 512 disks
-		# and one system with 4k disks.
+		# ZFS wastes appx one extra sector worth of space when
+		# compression is enabled. I verified this using one system with
+		# 512b disks and one system with 4k disks.
 		#
 		# If compression is _not_ enabled, the waste is much worse - the
 		# remainder of the record is wasted space.
@@ -161,7 +147,11 @@ function zero_variables() {
 	}
 
 	# Do the usage calculations.
-	data_sectors = num_whole_records * sectors_per_record
+	data_sectors = obj_size_bytes / sector_size
+	if (data_sectors % 1 > 0) {
+	    # No partial data sectors
+	    data_sectors = int(data_sectors + 1)
+	}
 	data_stripes = data_sectors / max_data_sectors_per_stripe
 
 	if (data_stripes % 1 > 0) {
@@ -178,7 +168,11 @@ function zero_variables() {
 	# event that a partial-width stripe is freed.
 	padding_sectors = (parity_sectors + data_sectors) % (parity_level + 1)
 
-	obj_size_bytes = num_whole_records * recordsize_bytes
+	trailing_bytes = obj_size_bytes % sector_size
+	if (trailing_bytes > 0) {
+	    # round up physical usage to the next sector
+	    obj_size_bytes = obj_size_bytes + (sector_size - trailing_bytes)
+	}
 	parity_bytes = parity_sectors * sector_size
 	padding_bytes = padding_sectors * sector_size
 	if (num_whole_records > 1) {
@@ -186,7 +180,10 @@ function zero_variables() {
 		ind_block_usage_bytes += num_whole_records * \
 		    avg_ind_bytes_per_rec
 	}
+	calculate_totals()
+}
 
+function calculate_totals() {
 	total_blkptr_usage_bytes += blkptr_overhead * num_whole_records
 	total_ind_block_usage_bytes += ind_block_usage_bytes
 

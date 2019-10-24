@@ -36,6 +36,7 @@ BEGIN {
 	minimum_recordsize = 512 # smallest possible ZFS record.
 	sector_size = 4096 # 4k disks are most common nowadays.
 
+	compression = 1
 	compression_ratio = 1.04
 
 	# Need to know sectors per record so we can calculate any padding
@@ -51,7 +52,10 @@ BEGIN {
 	# ~45KB compressed to store 1024 ind blks
 	#  - meaning ~44 bytes per blkptr/record
 	avg_ind_bytes_per_rec = 45
-	blkptr_overhead = 256 # blkptr is 128 bytes, store two of 'em
+	# blkptr is 128 bytes, we store two of 'em, but the minimal allocation
+	# size is one sector, so blkptr_overhead == sector_size?
+	#blkptr_overhead = 256
+	blkptr_overhead = sector_size
 
 	max_data_sectors_per_stripe = raidz_stripe_width - parity_level
 
@@ -61,9 +65,10 @@ BEGIN {
 	total_wasted_bytes = 0
 	total_raidz_sectors = 0
 	total_padding_sectors = 0
+	total_blkptr_usage_bytes = 0
+	total_ind_block_usage_bytes = 0
 
-	printf "Simulating... variables:\n"
-	printf "account %s, parity %d, recordsize %d, ",
+	printf "Simulating... account %s, parity %d, recordsize %d, ",
 	    target_account, parity_level, recordsize_bytes
 	printf "raidz width %d, sector size %d\n",
 	    raidz_stripe_width, sector_size
@@ -141,22 +146,36 @@ function zero_variables() {
 		# ZFS uses a full record to write this 'partial' record.
 		num_whole_records++
 
-		# ZFS wastes the remainder of the recordsize block.
-		wasted_bytes = recordsize_bytes - \
-		    (recordsize_bytes * unused_record_portion)
+		# ZFS wastes one extra sector worth of space when compression
+		# is enabled. I verified this using one system with 512 disks
+		# and one system with 4k disks.
+		#
+		# If compression is _not_ enabled, the waste is much worse - the
+		# remainder of the record is wasted space.
+		if (compression) {
+			wasted_bytes = sector_size
+		} else {
+			wasted_bytes = recordsize_bytes - \
+			    (recordsize_bytes * unused_record_portion)
+		}
 	}
 
 	# Do the usage calculations.
 	data_sectors = num_whole_records * sectors_per_record
 	data_stripes = data_sectors / max_data_sectors_per_stripe
+
 	if (data_stripes % 1 > 0) {
+		# Partial parity sectors don't make sense - round up.
 		parity_sectors = (int(data_stripes) + 1) * parity_level
 	} else {
 		parity_sectors = data_stripes * parity_level
 	}
 
-	# Data + parity sectors must be a multiple of parity_level+1. If not,
-	# add padding until it is.
+	# The number of data and parity sectors must be a multiple of
+	# parity_level+1. If it is not, add padding until it is.
+	#
+	# This is so that ZFS doesn't end up with un-allocatable space in the
+	# event that a partial-width stripe is freed.
 	padding_sectors = (parity_sectors + data_sectors) % (parity_level + 1)
 
 	obj_size_bytes = num_whole_records * recordsize_bytes
@@ -168,11 +187,15 @@ function zero_variables() {
 		    avg_ind_bytes_per_rec
 	}
 
+	total_blkptr_usage_bytes += blkptr_overhead * num_whole_records
+	total_ind_block_usage_bytes += ind_block_usage_bytes
+
 	total_usage_bytes += blkptr_overhead * num_whole_records
 	total_usage_bytes += obj_size_bytes
 	total_usage_bytes += parity_bytes
 	total_usage_bytes += ind_block_usage_bytes
 	total_usage_bytes += padding_bytes
+
 	total_wasted_bytes += wasted_bytes
 	total_records += num_whole_records
 	total_raidz_sectors += parity_sectors
@@ -189,22 +212,49 @@ function zero_variables() {
 # Big numbers are hard to read!
 # One TiB is 1024^4 bytes.
 function btotib(bytes) {
-	return bytes / 1024 / 1024 / 1024 / 1024
+	return btogib(bytes) / 1024
+}
+
+function btogib(bytes) {
+	return bytes / 1024 / 1024 / 1024
 }
 
 END {
-	total_usage_bytes /= compression_ratio
-	
-	printf "=== REPORT ===\n"
-	printf "%d\t\tBytes Used\n%d\t\tWasted Bytes\n", total_usage_bytes,
-	    total_wasted_bytes
-	printf "%d\t\tRecords\n%d\t\tRAIDZ sectors\n", total_records,
-	    total_raidz_sectors
-	printf "%d\t\tPadding sectors\n", total_padding_sectors
+	if (compression) {
+		total_usage_bytes /= compression_ratio
+	}
 
-	printf "%.2f\t\t\tTiB Used\n%.2g\t\t\tTiB wasted\n",
-	    btotib(total_usage_bytes), btotib(total_wasted_bytes)
-	printf "%.2f\t\t\tTiB RAIDZ\n",
-	    btotib(total_raidz_sectors * sector_size)
+	if (output_csv) {
+		printf "records,gib_used,gib_wasted,gib_raidz,gib_padding,"
+		printf "gib_blkptrs,gib_ind\n"
 
+		printf "%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n\n",
+		    total_records,
+		    btogib(total_usage_bytes),
+		    btogib(total_wasted_bytes),
+		    btogib(total_raidz_sectors * sector_size),
+		    btogib(total_padding_sectors * sector_size),
+		    btogib(total_blkptr_usage_bytes),
+		    btogib(total_ind_block_usage_bytes)
+	} else {
+		printf "=== REPORT ===\n"
+		printf "%d\t\tRecords\n", total_records
+
+		printf "%.2f\t\t\tGiB Used\n",
+		    btogib(total_usage_bytes)
+
+		printf "%.2f\t\t\tGiB wasted\n", btogib(total_wasted_bytes)
+
+		printf "%.2f\t\t\tGiB RAIDZ\n",
+		    btogib(total_raidz_sectors * sector_size)
+
+		printf "%.2f\t\t\tGiB Padding\n",
+		    btogib(total_padding_sectors * sector_size)
+
+		printf "%.2f\t\t\tGiB for blkptrs\n",
+		    btogib(total_blkptr_usage_bytes)
+
+		printf "%.2f\t\t\tGiB for ind blocks\n",
+		    btogib(total_ind_block_usage_bytes)
+    }
 }

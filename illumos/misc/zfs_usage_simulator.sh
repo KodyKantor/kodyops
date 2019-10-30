@@ -26,8 +26,8 @@
 BEGIN {
 	# Tunables
 	target_account = "*" # Account UUID to use, or * for all accounts.
-	verbose = 0 # Used for debugging.
 
+	#verbose = 0 # Used for debugging.
 	#recordsize_kb = 512 # ZFS recordsize for the simulation.
 	#raidz_stripe_width = 11 # disks per RAIDZ stripe.
 	#parity_level = 2 # RAIDZ parity level (0 thru 3).
@@ -50,11 +50,11 @@ BEGIN {
 	# ind blks stored compressed
 	# ~45KB compressed to store 1024 ind blks
 	#  - meaning ~44 bytes per blkptr/record
-	avg_ind_bytes_per_rec = 45
-	# blkptr is 128 bytes, we store two of 'em, but the minimal allocation
-	# size is one sector, so blkptr_overhead == sector_size?
-	#blkptr_overhead = 256
-	blkptr_overhead = sector_size
+	avg_ind_bytes_per_block = 45
+	# blkptr is 128 bytes, we store two of 'em, but they compress very well.
+	# Assume 128 bytes of overhead for indirect blocks that point to data
+	# blocks.
+	blkptr_overhead = 128
 
 	max_data_sectors_per_stripe = raidz_stripe_width - parity_level
 
@@ -91,11 +91,30 @@ function zero_variables() {
 	padding_sectors = 0
 }
 
+function print_stats() {
+	if (verbose) {
+	    printf "logical: %d, compressed: %d, data sect: %d, ",
+	        $2, obj_size_bytes, data_sectors
+
+	    printf "parity sect: %d, padding sect: %d, blocks: %d, ",
+	        parity_sectors, padding_sectors, num_whole_records
+
+	    printf "ind-1 usg: %d, ind-0 usg: %d\n",
+	        ind_block_usage_bytes, blkptr_overhead * num_whole_records
+	}
+}
+
 # Main loop.
 {
 	account = $1
-	obj_size_bytes = $2
+	obj_size_bytes = $2 / compression_ratio
 	zero_variables()
+
+	trailing_bytes = obj_size_bytes % sector_size;
+	if (trailing_bytes > 0) {
+	    # round up physical usage to the next sector
+	    obj_size_bytes = obj_size_bytes + (sector_size - trailing_bytes)
+	}
 	
 	# * is a wildcard. Otherwise only look at objects for the provided
 	# account uuid.
@@ -113,12 +132,15 @@ function zero_variables() {
 		# The actual size of the record isn't used in the accounting
 		# routine though, so this is fine.
 		num_whole_records = 1
+		data_sectors = 1
 
 		parity_bytes = parity_sectors * sector_size
 		padding_bytes = 0
 		ind_block_usage_bytes = 0
 		wasted_bytes = 0
 		padding_sectors = 0
+
+		print_stats()
 		calculate_totals()
 		next
 	}
@@ -126,6 +148,8 @@ function zero_variables() {
 	# Figure out how many full and 'partial' records this file uses.
 	num_records = obj_size_bytes / recordsize_bytes
 	num_whole_records = int(obj_size_bytes / recordsize_bytes)
+	if (num_whole_records == 0) { num_whole_records = 1 }
+
 	unused_record_portion = num_records - num_whole_records
 	if (unused_record_portion > 0 && num_whole_records > 0) {
 		# ZFS uses a full record to write this 'partial' record.
@@ -164,22 +188,18 @@ function zero_variables() {
 	# The number of data and parity sectors must be a multiple of
 	# parity_level+1. If it is not, add padding until it is.
 	#
-	# This is so that ZFS doesn't end up with un-allocatable space in the
-	# event that a partial-width stripe is freed.
-	padding_sectors = (parity_sectors + data_sectors) % (parity_level + 1)
+	# This is so that ZFS always has space for small allocations like one
+        # data sector and two parity sectors.	
+	remainder = (parity_sectors + data_sectors) % (parity_level + 1)
+	padding_sectors = (remainder == 0 ? 0 : parity_level + 1 - remainder)
 
-	trailing_bytes = obj_size_bytes % sector_size
-	if (trailing_bytes > 0) {
-	    # round up physical usage to the next sector
-	    obj_size_bytes = obj_size_bytes + (sector_size - trailing_bytes)
-	}
 	parity_bytes = parity_sectors * sector_size
 	padding_bytes = padding_sectors * sector_size
 	if (num_whole_records > 1) {
 		ind_block_usage_bytes = blkptr_overhead
-		ind_block_usage_bytes += num_whole_records * \
-		    avg_ind_bytes_per_rec
 	}
+
+	print_stats()
 	calculate_totals()
 }
 
@@ -197,13 +217,6 @@ function calculate_totals() {
 	total_records += num_whole_records
 	total_raidz_sectors += parity_sectors
 	total_padding_sectors += padding_sectors
-
-	if (verbose) {
-		printf "%d byte obj: %d records, %d disk bytes, ", obj_size_bytes,
-			num_whole_records, obj_size_bytes
- 		printf "%d parity bytes, %d ind, %d wasted\n", parity_bytes,
-			ind_block_usage_bytes, wasted_bytes
-	}
 }
 
 # Big numbers are hard to read!
@@ -217,10 +230,6 @@ function btogib(bytes) {
 }
 
 END {
-	if (compression) {
-		total_usage_bytes /= compression_ratio
-	}
-
 	if (output_csv) {
 		printf "records,gib_used,gib_wasted,gib_raidz,gib_padding,"
 		printf "gib_blkptrs,gib_ind\n"

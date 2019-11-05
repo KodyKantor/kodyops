@@ -1,6 +1,10 @@
 #!/opt/local/bin/gawk -f
-# using gawk because it can handle huge numbers better than nawk.
+#
+# Copyright 2019, Joyent Inc.
+#
 
+# We're using gawk here because it can handle huge numbers better than nawk.
+#
 # This is a program meant to simulate the capacity usage for varying ZFS record
 # sizes and parity levels. The input is a file that includes two columns of
 # data:
@@ -9,7 +13,9 @@
 # - The second column is the size in bytes of an object for the account in
 #   the first column. This is likely the logical size.
 # 
-# For example, input might look like this:
+# For example, input might look like this, where the left column is a username,
+# and the right column is the logical size of a file in bytes. This could be
+# obtained using something like find(1).
 # 
 # 	kody	1
 # 	kody	102

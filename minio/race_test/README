@@ -1,0 +1,39 @@
+# race_test
+
+## Overview
+
+`race_test.sh` is a simple test to check for race conditions when standalone MinIO
+servers are configured to share the same physical storage.
+
+This script assumes a few things:
+- The `mc` command is installed.
+- There are data files named `one` and `two` in this directory. These will be
+  uploaded to MinIO instances.
+- The MinIO `mc` targets are named `min0` and `min1`. This can be changed at the
+  top of the script if necessary.
+
+## Example
+
+```
+$ ./race_test.sh
+uploads: begin
+uploads: done
+downloading file
+comparing files
+pass
+---
+uploads: begin
+mc: <ERROR> Unable to write to one or more targets. One or more of the specified parts could not be found.  The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.
+mc: <ERROR> Unable to write to one or more targets. One or more of the specified parts could not be found.  The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.
+uploads: done
+downloading file
+mc failed: 'mc: <ERROR> Unable to read from `min0/test/dest`. The specified key does not exist.'
+```
+
+We see that during the second iteration MinIO failed to upload both files and
+the file that was in the position before (`min0/test/dest`) no longer exists.
+This is data loss. I wouldn't expect a failed upload to delete the previous
+iteration's data file.
+
+MinIO can't safely be run against shared storage (which probably isn't news to
+anyone).

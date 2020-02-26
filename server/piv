@@ -1,0 +1,17 @@
+# function to make using piv-agent easier.
+
+piv () {
+	case "$1" in
+		(list) piv-tool list ;;
+		(ssh) ssh-add -X ;;
+		(key) piv-tool pubkey 9a ;;
+		(unlock) piv key
+			ret=$?
+			if [[ "$ret" -ne 0 ]]
+			then
+				return 1
+			fi
+			piv ssh ;;
+		(*) echo "piv [list|ssh|key|unlock]" ;;
+	esac
+}

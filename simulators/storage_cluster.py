@@ -15,7 +15,7 @@ bit = 1
 user_data_gigabits = 120
 
 # For printing stats in 'byte' base or 'bit' base.
-unit_divisor = byte
+unit_divisor = bit
 
 # Number of storage clusters.
 cluster_count = 1
@@ -27,11 +27,11 @@ parity_chunks = 3
 
 # True: Pack all of a given DC's cluster members into one rack.
 # False: Spread out a given DC's cluster members into separate racks.
-rack_locality = False
+rack_locality = True
 
 datacenters = 3
-racks_per_dc = 3
-machines_per_rack = 10
+racks_per_dc = 1
+machines_per_rack = 3
 
 class Region:
     def __init__(self, datacenters, racks_per_dc, machines_per_rack):
@@ -139,7 +139,7 @@ class Datacenter:
                 map(lambda x: x.deallocate_machines(cluster), allocated)
                 err = 'failed to allocate cluster: ' + err
                 break
-        if len(allocated) < hosts_per_dc:
+        if not opts['rack_locality'] and len(allocated) < hosts_per_dc:
             map(lambda x: x.deallocate_machines(cluster), allocated)
             err = 'failed to allocate enough machines'
         return err

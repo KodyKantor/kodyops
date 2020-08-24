@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 '''
 Copyright 2020 Joyent, Inc.
 '''
@@ -32,6 +34,7 @@ rack_locality = True
 datacenters = 3
 racks_per_dc = 1
 machines_per_rack = 3
+disks_per_machine = 35
 
 class Region:
     def __init__(self, datacenters, racks_per_dc, machines_per_rack):
@@ -73,7 +76,7 @@ class Region:
         if not hosts_per_dc.is_integer():
             return 'hosts must be evenly divisible by number of DCs'
 
-        cluster = SmaugCluster(self, opts)
+        cluster = StorageCluster(self, opts)
         self.clusters.append(cluster)
 
         opts['hosts_per_dc'] = hosts_per_dc
@@ -85,11 +88,15 @@ class Region:
     def get_number_of_datacenters(self):
         return len(self.datacenters)
 
-    def receive_data(self, size_gigabits):
+    def upload(self, size_gigabits):
         data_per_cluster = size_gigabits / len(self.clusters)
         for cluster in self.clusters:
-            cluster.receive_data(data_per_cluster)
-        pass
+            cluster.ingress(data_per_cluster)
+
+    def download(self, size_gigabits):
+        data_per_cluster = size_gigabits / len(self.clusters)
+        for cluster in self.clusters:
+            cluster.egress(data_per_cluster)
 
     def __str__(self):
         ret = 'Region\n'
@@ -109,7 +116,7 @@ class Datacenter:
     def __str__(self):
         tx = self.get_tx()
         rx = self.get_rx()
-        ret = '-> DC{0}: tx={1:.1f} rx={2:.1f}\n'.format(self.idx, tx, rx)
+        ret = '  DC{0}: tx={1:.1f} rx={2:.1f}\n'.format(self.idx, tx, rx)
         for rack in self.racks:
             ret = ret + '   ' + str(rack)
         return ret
@@ -195,7 +202,7 @@ class Rack:
     def __str__(self):
         tx = self.get_tx()
         rx = self.get_rx()
-        ret = '-> RACK{0}: tx={1:.1f} rx={2:.1f}\n'.format(self.idx, tx, rx)
+        ret = '  RACK{0}: tx={1:.1f} rx={2:.1f}\n'.format(self.idx, tx, rx)
         for machine in self.machines:
             ret = ret + '      ' + str(machine)
         return ret
@@ -220,10 +227,10 @@ class Machine:
     def get_cluster_idx(self):
         return self.cluster_idx
 
-    def receive_data(self, size_gigabits):
+    def ingress(self, size_gigabits):
         self.rx += size_gigabits
 
-    def send_data(self, size_gigabits):
+    def egress(self, size_gigabits):
         self.tx += size_gigabits
 
     def get_tx(self):
@@ -240,43 +247,79 @@ class Machine:
             id_str = 'unalloc'
         else:
             id_str = str(self.cluster_idx)
-        ret = '-> MACHINE{0}: cluster={1} tx={2:.1f} rx={3:.1f}\n'.format(self.idx, id_str, tx, rx)
+        ret = '  MACHINE{0}: cluster={1} tx={2:.1f} rx={3:.1f}\n'.format(self.idx, id_str, tx, rx)
         return ret
 
-class SmaugCluster:
+class StorageCluster:
     def __init__(self, region, opts):
         self.idx = region.allocate_cluster_idx()
         self.placement = []
         self.parity = opts['parity_chunks']
-        self.rx = 0
-        self.tx = 0
 
     def get_idx(self):
         return self.idx
 
-    def receive_data(self, size_gigabits):
-        # XXX: unused
-        self.rx += size_gigabits
-
+    def ingress(self, size_gigabits):
         '''
-        request_handler_node = self.placement[random.randint(0, len(self.placement) - 1)]
-        request_handler_node.receive_data(size_gigabits)
+        The inbound stream of user data is split evenly between all members of
+        the cluster. This happens before we perform erasure coding.
         '''
-        
         user_data_per_node = size_gigabits / len(self.placement)
 
-        # The chunk size is based on the size of the user data (input) divided
-        # by the number of _data_ chunks in the cluster.
+        '''
+        The chunk size is based on the size of the user data (input) divided
+        by the number of _data_ chunks in the cluster.
+        '''
         chunk_size = user_data_per_node / (len(self.placement) - self.parity)
         for server in self.placement:
-            server.receive_data(user_data_per_node)
+            server.ingress(user_data_per_node)
 
             for remote in self.placement:
                 # Need to differentiate between rx/tx and disk throughput.
                 if remote == server:
                     pass
-                server.send_data(chunk_size)
-                remote.receive_data(chunk_size)
+                server.egress(chunk_size)
+                remote.ingress(chunk_size)
+
+    def egress(self, size_gigabits):
+        user_data_per_node = size_gigabits / len(self.placement)
+        chunk_size = user_data_per_node / (len(self.placement) - self.parity)
+
+        '''
+        Assuming there is no data corruption we only need to retrieve
+        (stripe_width - parity) chunks and concatenate them. In practice the
+        system will know which chunks are the data vs parity chunks, but here
+        we'll just randomly select a subset of nodes to be the data nodes.
+        This should model the actual behavior well in aggregate.
+        '''
+        data_chunk_count = len(self.placement) - self.parity
+
+        '''
+        Create chunk metadata.
+
+        The first N chunks are always data chunks, the last (self.parity) chunks
+        are always parity chunks. We shuffle this later to randomize data/parity
+        locality.
+        '''
+        chunks = [i for i in range(len(self.placement))]
+
+        for server in self.placement:
+            server.egress(user_data_per_node)
+
+            '''
+            Reorder chunk list to randomly spread data/parity chunk selection
+            across entire cluster.
+            '''
+            random.shuffle(chunks)
+
+            for remote_ind in range(data_chunk_count):
+                remote = self.placement[chunks[remote_ind]]
+
+                # Local IO - no network traffic.
+                if remote == server:
+                    pass
+                server.ingress(chunk_size)
+                remote.egress(chunk_size)
 
     def add_placement(self, machine):
         self.placement.append(machine)
@@ -296,6 +339,7 @@ if __name__ == '__main__':
             break
 
     size_gigabits = user_data_gigabits
-    region.receive_data(size_gigabits)
+    region.upload(size_gigabits)
+    region.download(size_gigabits)
 
     print(region)

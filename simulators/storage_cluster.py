@@ -14,7 +14,8 @@ bit = 1
 # Variables.
 
 # User data in gigabits
-user_data_gigabits = 120
+upload_data_gigabits = 600
+download_data_gigabits = 0
 
 # For printing stats in 'byte' base or 'bit' base.
 unit_divisor = bit
@@ -214,6 +215,8 @@ class Machine:
         self.cluster_idx = -1
         self.rx = 0
         self.tx = 0
+        self.write = 0
+        self.read = 0
 
     def is_allocated(self):
         return self.cluster_idx >= 0
@@ -227,11 +230,17 @@ class Machine:
     def get_cluster_idx(self):
         return self.cluster_idx
 
-    def ingress(self, size_gigabits):
-        self.rx += size_gigabits
+    def ingress(self, size_gigabits, net, disk):
+        if net:
+            self.rx += size_gigabits
+        if disk:
+            self.write += size_gigabits
 
-    def egress(self, size_gigabits):
-        self.tx += size_gigabits
+    def egress(self, size_gigabits, net, disk):
+        if net:
+            self.tx += size_gigabits
+        if disk:
+            self.read += size_gigabits
 
     def get_tx(self):
         return self.tx / unit_divisor
@@ -239,15 +248,28 @@ class Machine:
     def get_rx(self):
         return self.rx / unit_divisor
 
+    def get_read(self):
+        return self.read / unit_divisor
+
+    def get_write(self):
+        return self.write / unit_divisor
+
     def __str__(self):
+        # Network IO.
         tx = self.get_tx()
         rx = self.get_rx()
+
+        # Disk IO.
+        write = self.get_write()
+        read = self.get_read()
+
         id_str = ''
         if self.cluster_idx == -1:
             id_str = 'unalloc'
         else:
             id_str = str(self.cluster_idx)
-        ret = '  MACHINE{0}: cluster={1} tx={2:.1f} rx={3:.1f}\n'.format(self.idx, id_str, tx, rx)
+        ret = '  MACHINE{0}: cluster={1} tx={2:.1f} rx={3:.1f} write={4:.1f} read={5:.1f}\n'.format(
+                self.idx, id_str, tx, rx, write, read)
         return ret
 
 class StorageCluster:
@@ -272,14 +294,18 @@ class StorageCluster:
         '''
         chunk_size = user_data_per_node / (len(self.placement) - self.parity)
         for server in self.placement:
-            server.ingress(user_data_per_node)
+            server.ingress(user_data_per_node, net=True, disk=False)
 
             for remote in self.placement:
-                # Need to differentiate between rx/tx and disk throughput.
+
+                '''
+                The remote chunk server is actually local.
+                '''
                 if remote == server:
-                    pass
-                server.egress(chunk_size)
-                remote.ingress(chunk_size)
+                    remote.ingress(chunk_size, net=False, disk=True)
+                else:
+                    server.egress(chunk_size, net=True, disk=False)
+                    remote.ingress(chunk_size, net=True, disk=True)
 
     def egress(self, size_gigabits):
         user_data_per_node = size_gigabits / len(self.placement)
@@ -304,7 +330,7 @@ class StorageCluster:
         chunks = [i for i in range(len(self.placement))]
 
         for server in self.placement:
-            server.egress(user_data_per_node)
+            server.egress(user_data_per_node, net=True, disk=False)
 
             '''
             Reorder chunk list to randomly spread data/parity chunk selection
@@ -315,11 +341,14 @@ class StorageCluster:
             for remote_ind in range(data_chunk_count):
                 remote = self.placement[chunks[remote_ind]]
 
-                # Local IO - no network traffic.
+                '''
+                The remote chunk server is actually local.
+                '''
                 if remote == server:
-                    pass
-                server.ingress(chunk_size)
-                remote.egress(chunk_size)
+                    remote.egress(chunk_size, net=False, disk=True)
+                else:
+                    remote.egress(chunk_size, net=True, disk=True)
+                    server.ingress(chunk_size, net=True, disk=False)
 
     def add_placement(self, machine):
         self.placement.append(machine)
@@ -338,8 +367,8 @@ if __name__ == '__main__':
             print('error allocating smaug cluster: ' + str(err))
             break
 
-    size_gigabits = user_data_gigabits
-    region.upload(size_gigabits)
-    region.download(size_gigabits)
+    region.upload(upload_data_gigabits)
+    region.download(download_data_gigabits)
 
+    # print out the stats.
     print(region)

@@ -21,20 +21,23 @@ download_data_gigabits = 0
 unit_divisor = bit
 
 # Number of storage clusters.
-cluster_count = 1
+cluster_count = 9
 
 # Physical nodes per cluster. This is also used as the EC stripe width.
 nodes_per_cluster = 9
 
 parity_chunks = 3
 
-# True: Pack all of a given DC's cluster members into one rack.
-# False: Spread out a given DC's cluster members into separate racks.
+'''
+True: Pack all of a given DC's cluster members into one rack.
+False: Spread out a given DC's cluster members into separate racks. This will
+  still 'bin pack' each rack.
+'''
 rack_locality = True
 
 datacenters = 3
-racks_per_dc = 1
-machines_per_rack = 3
+racks_per_dc = 3
+machines_per_rack = 9
 disks_per_machine = 35
 
 class Region:
@@ -51,6 +54,9 @@ class Region:
                 self,
                 racks=racks_per_dc,
                 machines_per_rack=machines_per_rack))
+
+    def get_number_of_datacenters(self):
+        return len(self.datacenters)
 
     def allocate_dc_idx(self):
         val = self.dc_idx
@@ -86,9 +92,6 @@ class Region:
             if err != None:
                 return err
 
-    def get_number_of_datacenters(self):
-        return len(self.datacenters)
-
     def upload(self, size_gigabits):
         data_per_cluster = size_gigabits / len(self.clusters)
         for cluster in self.clusters:
@@ -114,13 +117,11 @@ class Datacenter:
         for x in range(racks):
             self.racks.append(Rack(region, machines=machines_per_rack))
 
-    def __str__(self):
-        tx = self.get_tx()
-        rx = self.get_rx()
-        ret = '  DC{0}: tx={1:.1f} rx={2:.1f}\n'.format(self.idx, tx, rx)
-        for rack in self.racks:
-            ret = ret + '   ' + str(rack)
-        return ret
+    def get_tx(self):
+        return reduce((lambda x, y: x + y.get_tx()), self.racks, 0)
+
+    def get_rx(self):
+        return reduce((lambda x, y: x + y.get_rx()), self.racks, 0)
 
     def allocate_smaug_cluster(self, cluster, opts):
         hosts_per_dc = opts['hosts_per_dc']
@@ -137,7 +138,7 @@ class Datacenter:
                 # successfully allocated all of this datacenter's cluster nodes.
                 break
             elif opts['rack_locality'] and rack.get_capacity() < hosts_per_dc:
-                return 'could not fit cluster in one rack (locality)'
+                continue
             elif not opts['rack_locality'] and rack.get_capacity() >= 1:
                 rack.allocate_machines(cluster, 1)
                 allocated.append(rack)
@@ -152,12 +153,13 @@ class Datacenter:
             err = 'failed to allocate enough machines'
         return err
 
-    def get_tx(self):
-        return reduce((lambda x, y: x + y.get_tx()), self.racks, 0)
-
-    def get_rx(self):
-        return reduce((lambda x, y: x + y.get_rx()), self.racks, 0)
-
+    def __str__(self):
+        tx = self.get_tx()
+        rx = self.get_rx()
+        ret = '  DC{0}: tx={1:.1f} rx={2:.1f}\n'.format(self.idx, tx, rx)
+        for rack in self.racks:
+            ret = ret + '   ' + str(rack)
+        return ret
 
 class Rack:
     def __init__(self, region, machines):
@@ -167,6 +169,15 @@ class Rack:
         for x in range(machines):
             self.machines.append(Machine(region))
         self.capacity = len(self.machines)
+
+    def get_capacity(self):
+        return self.capacity
+
+    def get_tx(self):
+        return reduce((lambda x, y: x + y.get_tx()), self.machines, 0)
+
+    def get_rx(self):
+        return reduce((lambda x, y: x + y.get_rx()), self.machines, 0)
 
     def allocate_machines(self, cluster, nr_allocate):
         allocated = []
@@ -191,15 +202,6 @@ class Rack:
             if machine.is_allocated() and machine.get_cluster_idx() == cluster.get_idx():
                 machine.deallocate()
 
-    def get_capacity(self):
-        return self.capacity
-
-    def get_tx(self):
-        return reduce((lambda x, y: x + y.get_tx()), self.machines, 0)
-
-    def get_rx(self):
-        return reduce((lambda x, y: x + y.get_rx()), self.machines, 0)
-
     def __str__(self):
         tx = self.get_tx()
         rx = self.get_rx()
@@ -210,7 +212,6 @@ class Rack:
 
 class Machine:
     def __init__(self, region):
-        #self.region = region
         self.idx = region.allocate_machine_idx()
         self.cluster_idx = -1
         self.rx = 0
@@ -230,18 +231,6 @@ class Machine:
     def get_cluster_idx(self):
         return self.cluster_idx
 
-    def ingress(self, size_gigabits, net, disk):
-        if net:
-            self.rx += size_gigabits
-        if disk:
-            self.write += size_gigabits
-
-    def egress(self, size_gigabits, net, disk):
-        if net:
-            self.tx += size_gigabits
-        if disk:
-            self.read += size_gigabits
-
     def get_tx(self):
         return self.tx / unit_divisor
 
@@ -253,6 +242,18 @@ class Machine:
 
     def get_write(self):
         return self.write / unit_divisor
+
+    def ingress(self, size_gigabits, net, disk):
+        if net:
+            self.rx += size_gigabits
+        if disk:
+            self.write += size_gigabits
+
+    def egress(self, size_gigabits, net, disk):
+        if net:
+            self.tx += size_gigabits
+        if disk:
+            self.read += size_gigabits
 
     def __str__(self):
         # Network IO.
@@ -268,7 +269,7 @@ class Machine:
             id_str = 'unalloc'
         else:
             id_str = str(self.cluster_idx)
-        ret = '  MACHINE{0}: cluster={1} tx={2:.1f} rx={3:.1f} write={4:.1f} read={5:.1f}\n'.format(
+        ret = '  MACHINE{0}: cluster={1} tx={2:.1f} rx={3:.1f} disk_write={4:.1f} disk_read={5:.1f}\n'.format(
                 self.idx, id_str, tx, rx, write, read)
         return ret
 
@@ -280,6 +281,10 @@ class StorageCluster:
 
     def get_idx(self):
         return self.idx
+
+    def add_placement(self, machine):
+        self.placement.append(machine)
+
 
     def ingress(self, size_gigabits):
         '''
@@ -350,9 +355,6 @@ class StorageCluster:
                     remote.egress(chunk_size, net=True, disk=True)
                     server.ingress(chunk_size, net=True, disk=False)
 
-    def add_placement(self, machine):
-        self.placement.append(machine)
-
 if __name__ == '__main__':
     region = Region(datacenters, racks_per_dc, machines_per_rack)
 
@@ -363,6 +365,7 @@ if __name__ == '__main__':
             'dcs': 3,
             'parity_chunks': parity_chunks
         })
+
         if err:
             print('error allocating smaug cluster: ' + str(err))
             break

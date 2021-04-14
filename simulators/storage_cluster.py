@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
 Copyright 2020 Joyent, Inc.
@@ -15,29 +15,29 @@ bit = 1
 
 # User data in gigabits
 upload_data_gigabits = 600
-download_data_gigabits = 0
+download_data_gigabits = 300
 
 # For printing stats in 'byte' base or 'bit' base.
 unit_divisor = bit
 
 # Number of storage clusters.
-cluster_count = 9
+cluster_count = 4
 
 # Physical nodes per cluster. This is also used as the EC stripe width.
-nodes_per_cluster = 9
+nodes_per_cluster = 12
 
-parity_chunks = 3
+parity_chunks = 4
 
 '''
 True: Pack all of a given DC's cluster members into one rack.
 False: Spread out a given DC's cluster members into separate racks. This will
   still 'bin pack' each rack.
 '''
-rack_locality = True
+rack_locality = False
 
 datacenters = 3
-racks_per_dc = 3
-machines_per_rack = 9
+racks_per_dc = 4
+machines_per_rack = 4
 disks_per_machine = 35
 
 class Region:
